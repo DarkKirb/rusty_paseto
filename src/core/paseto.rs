@@ -1,12 +1,13 @@
 use super::*;
 #[cfg(feature = "aes")]
-use aes::{cipher::generic_array::GenericArray, Aes256Ctr};
-use base64::{encode_config, URL_SAFE_NO_PAD};
-#[cfg(feature = "blake2")]
-use blake2::{
-  digest::{Update, VariableOutput},
-  VarBlake2b,
+use aes::{
+  cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher as AesStreamCipher},
+  Aes256,
 };
+use base64::{encode_config, URL_SAFE_NO_PAD};
+use blake2::digest::FixedOutput;
+#[cfg(feature = "blake2")]
+use blake2::Blake2bMac;
 #[cfg(feature = "chacha20")]
 use chacha20::cipher::{NewCipher, StreamCipher};
 #[cfg(all(feature = "chacha20", any(feature = "v2_local", feature = "v4_local")))]
@@ -16,11 +17,16 @@ use chacha20poly1305::{
   aead::{Aead, NewAead, Payload as AeadPayload},
   XChaCha20Poly1305, XNonce,
 };
+#[cfg(feature = "aes")]
+use ctr::Ctr64BE;
+#[cfg(feature = "v2_local")]
+use typenum::U24;
+use typenum::{U32, U56};
 
 #[cfg(feature = "ed25519-dalek")]
 use ed25519_dalek::*;
 #[cfg(feature = "hmac")]
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 
 #[cfg(any(feature = "v1_local", feature = "v3_local", feature = "v4_local"))]
 use ring::constant_time::verify_slices_are_equal as ConstantTimeEquals;
@@ -40,6 +46,9 @@ use std::{
   ops::{Add, Deref},
   str, usize,
 };
+
+#[cfg(feature = "aes")]
+type Aes256Ctr = Ctr64BE<Aes256>;
 
 /// Used to build and encrypt / decrypt core PASETO tokens
 ///
@@ -523,9 +532,9 @@ impl<'a> Paseto<'a, V2, Local> {
     let footer = self.footer.unwrap_or_default();
 
     //create the blake2 context to generate the nonce
-    let mut blake2 = VarBlake2b::new_keyed(nonce.as_ref(), 24);
+    let mut blake2 = Blake2bMac::<U24>::new_from_slice(nonce.as_ref()).unwrap();
     blake2.update(&*self.payload);
-    let context = blake2.finalize_boxed();
+    let context = blake2.finalize_fixed();
 
     //create the nonce
     let nonce = XNonce::from_slice(&context);
@@ -976,10 +985,10 @@ struct Tag<Version, Purpose> {
 #[cfg(feature = "v4_local")]
 impl Tag<V4, Local> {
   fn from(authentication_key: impl AsRef<[u8]>, pae: &PreAuthenticationEncoding) -> Self {
-    let mut tag_context = VarBlake2b::new_keyed(authentication_key.as_ref(), 32);
+    let mut tag_context = Blake2bMac::<U32>::new_from_slice(authentication_key.as_ref()).unwrap();
     tag_context.update(pae.as_ref());
     Self {
-      tag: tag_context.finalize_boxed().as_ref().to_vec(),
+      tag: tag_context.finalize_fixed().to_vec(),
       version: PhantomData,
       purpose: PhantomData,
     }
@@ -1151,12 +1160,11 @@ impl EncryptionKey<V3, Local> {
 #[cfg(feature = "v4_local")]
 impl EncryptionKey<V4, Local> {
   fn from(message: &Key<53>, key: &PasetoSymmetricKey<V4, Local>) -> Self {
-    //let mut context = Blake2b::new_keyed(key.as_ref(), 56);
-    let mut context = VarBlake2b::new_keyed(key.as_ref(), 56);
+    let mut context = Blake2bMac::<U56>::new_from_slice(key.as_ref()).unwrap();
     context.update(message.as_ref());
-    let context = context.finalize_boxed();
-    let key = context.as_ref()[..32].to_vec();
-    let nonce = context.as_ref()[32..].to_vec();
+    let context = context.finalize_fixed();
+    let key = context[..32].to_vec();
+    let nonce = context[32..].to_vec();
     assert_eq!(key.len(), 32);
     assert_eq!(nonce.len(), 24);
     Self {
@@ -1268,12 +1276,12 @@ impl AuthenticationKey<V3, Local> {
 #[cfg(feature = "v4_local")]
 impl AuthenticationKey<V4, Local> {
   fn from(message: &Key<56>, key: &PasetoSymmetricKey<V4, Local>) -> Self {
-    let mut context = VarBlake2b::new_keyed(key.as_ref(), 32);
+    let mut context = Blake2bMac::<U32>::new_from_slice(key.as_ref()).unwrap();
     context.update(message.as_ref());
     Self {
       version: PhantomData,
       purpose: PhantomData,
-      key: context.finalize_boxed().as_ref().to_vec(),
+      key: context.finalize_fixed().to_vec(),
     }
   }
 }
